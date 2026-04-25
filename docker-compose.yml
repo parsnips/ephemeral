@@ -1,0 +1,41 @@
+# Ephemeral Twisp tenant for heavy/local-impossible tests.
+#
+# Single service: `proxy` vends a fresh tenant on the parent ("vend") tenant
+# at startup, exposes localhost:8080 (HTTP/GraphQL) and localhost:8081 (gRPC)
+# as a drop-in unauthenticated replacement for twisp-local, and deletes the
+# tenant on SIGTERM.
+#
+# `docker compose up`   creates the tenant + listens.
+# `docker compose down` sends SIGTERM; the proxy reaps the tenant before exit.
+#
+# Required (in .env or your shell):
+#   AWS_REGION                 AWS region for STS + the Twisp region.
+#   AWS_PROFILE / AWS_*        credentials for an IAM principal trusted by the vend tenant's auth client.
+#   VEND_ACCOUNT_ID            accountId of the vend (parent) tenant.
+#   TWISP_ENV                  e.g. cloud, dev. Defaults to cloud.
+#   AUDIENCE                   JWT aud claim. Must match the vend tenant's client policy assertion. Defaults to "ephemeral".
+
+services:
+  proxy:
+    build: .
+    image: twisp-ephemeral:dev
+    command:
+      - -region=${AWS_REGION:-us-east-1}
+      - -env=${TWISP_ENV:-cloud}
+      - -audience=${AUDIENCE:-ephemeral}
+      - -vend-account=${VEND_ACCOUNT_ID}
+      - -prefix=${EPHEMERAL_PREFIX:-ephemeral}
+      - -http=:8080
+      - -grpc=:8081
+    environment:
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - ${HOME}/.aws:/home/nonroot/.aws:ro
+    stop_grace_period: 60s

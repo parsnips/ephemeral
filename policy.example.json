@@ -1,0 +1,10 @@
+[
+  {
+    "effect": "ALLOW",
+    "actions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+    "resources": ["*"],
+    "assertions": {
+      "audIsEphemeral": "context.auth.claims.aud == 'ephemeral'"
+    }
+  }
+]
