@@ -1,6 +1,6 @@
 # Ephemeral Twisp tenants for heavy local tests
 
-Twisp local (`bazel run //services/db/server:server_public`) is great for fast
+[Twisp local](https://www.twisp.com/docs/infrastructure/local-environment) is great for fast
 iteration, but some tests need a real Twisp on real DynamoDB to drive the
 throughput we want. This repo bridges the gap: `docker compose up` vends a
 fresh cloud tenant, `docker compose down` deletes it, and in between everything
@@ -20,13 +20,13 @@ on `localhost:8080` / `localhost:8081` looks just like twisp-local.
 
 ## What you get
 
-| File / dir            | What it is                                                                  |
-|-----------------------|------------------------------------------------------------------------------|
-| `auth/`               | Reusable `http.RoundTripper` and gRPC `PerRPCCredentials` driven by `sts:GetWebIdentityToken`. |
-| `vend/`               | Library for `admin.createTenant` / `admin.deleteTenant` / bootstrap `auth.createClient`. |
+| File / dir            | What it is                                                                                               |
+|-----------------------|----------------------------------------------------------------------------------------------------------|
+| `auth/`               | Reusable `http.RoundTripper` and gRPC `PerRPCCredentials` driven by `sts:GetWebIdentityToken`.           |
+| `vend/`               | Library for `admin.createTenant` / `admin.deleteTenant` / bootstrap `auth.createClient`.                 |
 | `cmd/proxy/`          | Single binary. Vends a tenant on startup, runs the HTTP+gRPC drop-in proxy, reaps the tenant on SIGTERM. |
-| `docker-compose.yml`  | One-service compose wrapping the above.                                     |
-| `policy.example.json` | Sample policy if you need to bootstrap the new tenant's auth client by hand. |
+| `docker-compose.yml`  | One-service compose wrapping the above.                                                                  |
+| `policy.example.json` | Sample policy if you need to bootstrap the new tenant's auth client by hand.                             |
 
 ## How the auth works
 
@@ -70,6 +70,8 @@ mutation CreateVendTenant {
 ```
 
 ### 2. Find your AWS STS issuer
+
+See more about using [AWS outbound identity](https://aws.amazon.com/blogs/aws/simplify-access-to-external-services-using-aws-iam-outbound-identity-federation/)
 
 ```sh
 aws sts get-web-identity-token --audience ephemeral --signing-algorithm RS256 \
@@ -127,6 +129,24 @@ docker compose down      # deletes the ephemeral tenant
 
 The first run takes a beat (image build + `createTenant` round trip). Once the
 proxy logs `proxy targeting tenant accountId=ephemeral-…` you're good.
+
+### Built-in healthcheck
+
+The binary doubles as its own healthcheck — `proxy healthcheck` runs a GraphQL
+schema introspection query (`{ __schema { queryType { name } } }`) against the
+local listener, which exercises the full path: HTTP listener → auth round
+tripper → STS token → upstream tenant. It exits 0 on success, non-zero with a
+diagnostic message on failure.
+
+```sh
+# defaults: -addr=http://localhost:8080  -path=/financial/v1/graphql  -timeout=5s
+docker compose exec proxy /usr/local/bin/proxy healthcheck
+```
+
+The bundled compose file wires this up as a Docker `HEALTHCHECK`, which means
+`docker compose ps` reports `healthy` only once tenant vending is finished and
+the upstream is actually answering. The image is distroless (no `curl`/`wget`),
+so this subcommand is the supported way to probe it.
 
 ## Running locally (no docker)
 
@@ -206,6 +226,166 @@ Two flags flip the proxy out of vend mode and onto a tenant you already have:
 
 Useful for rerunning against a leaked tenant, or sharing one between several
 proxy invocations.
+
+## Embedding the proxy in your own compose project
+
+The bundled `docker-compose.yml` is the minimal example — one service, ports
+on the host. The expected real-world shape is to run the proxy alongside your
+own services so they can talk to it on the compose network.
+
+### 1. Get the image
+
+Pick one — they all end with an image you can refer to.
+
+**A. Pre-build once, reference by tag (simplest):**
+
+```sh
+git clone https://github.com/parsnips/ephemeral.git
+docker build -t twisp-ephemeral:dev ./ephemeral
+```
+
+Then in your compose: `image: twisp-ephemeral:dev` (no `build:` block).
+
+**B. Build context as a sibling path:**
+
+```yaml
+services:
+  twisp:
+    build: ../ephemeral        # path to a checkout
+    image: twisp-ephemeral:dev
+```
+
+**C. Build directly from the git URL (no checkout needed):**
+
+```yaml
+services:
+  twisp:
+    build: https://github.com/parsnips/ephemeral.git#main
+    image: twisp-ephemeral:dev
+```
+
+In CI, A is usually what you want — build it once, push it to your registry,
+pull it in.
+
+### 2. Wire it into your compose
+
+The two things to remember:
+
+- **Inside the compose network, other services reach the proxy by service
+  name and container port** — `http://twisp:8080`, `twisp:8081`.
+  `localhost:8080` only works from the host.
+- **Vending a tenant takes 5–30s.** Anything that calls Twisp on startup
+  needs a healthcheck-gated `depends_on`, otherwise it'll race the proxy and
+  502. The image ships a `proxy healthcheck` subcommand so you don't need
+  `curl`/`wget` (the distroless base doesn't ship either).
+
+```yaml
+# docker-compose.yml in YOUR project
+services:
+  twisp:
+    image: twisp-ephemeral:dev      # or the build: stanza from above
+    command:
+      - -region=${AWS_REGION:-us-east-1}
+      - -env=${TWISP_ENV:-cloud}
+      - -audience=${AUDIENCE:-ephemeral}
+      - -vend-account=${VEND_ACCOUNT_ID}
+      - -prefix=${EPHEMERAL_PREFIX:-ephemeral}
+      - -http=:8080
+      - -grpc=:8081
+    environment:
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    volumes:
+      - ${HOME}/.aws:/home/nonroot/.aws:ro     # drop in CI; use env creds instead
+    ports:                                     # only if you also hit it from the host
+      - "8080:8080"
+      - "8081:8081"
+    stop_grace_period: 60s                     # tenant delete can take >10s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/proxy", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  api:                          # your service — talks to Twisp like it was twisp-local
+    image: my-org/api:dev
+    environment:
+      TWISP_HTTP: http://twisp:8080
+      TWISP_GRPC: twisp:8081
+    depends_on:
+      twisp:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+  worker:
+    image: my-org/worker:dev
+    environment:
+      TWISP_HTTP: http://twisp:8080
+      TWISP_GRPC: twisp:8081
+    depends_on:
+      twisp:
+        condition: service_healthy
+```
+
+The `healthcheck` runs `proxy healthcheck` inside the container, which POSTs
+a GraphQL schema introspection query to the local HTTP listener. That walks
+the full path (listener → auth → upstream), so `service_healthy` means
+"tenant is vended and the upstream actually answers", not just "process is
+alive".
+
+### 3. `.env` next to your compose
+
+Same variables as the standalone repo:
+
+```sh
+AWS_REGION=us-east-1
+AWS_PROFILE=cloud-rw
+VEND_ACCOUNT_ID=ephemeral-vend
+TWISP_ENV=cloud
+AUDIENCE=ephemeral
+EPHEMERAL_PREFIX=ephemeral
+```
+
+### 4. Run it
+
+```sh
+docker compose up -d twisp           # vend tenant first if you want to watch it
+docker compose logs -f twisp         # wait for "proxy targeting tenant accountId=…"
+docker compose up                    # bring up the rest
+# … run your tests / poke around …
+docker compose down                  # SIGTERM → tenant deleted
+```
+
+`docker compose down` is **mandatory**. `kill -9`, `docker rm -f`, or
+`docker compose kill` skip the SIGTERM handler and leak the tenant.
+
+### CI notes
+
+- Drop the `~/.aws` volume mount; pass `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` as env vars from your CI's
+  OIDC role.
+- Always wrap with `trap 'docker compose down -v' EXIT` so a failed test still
+  reaps the tenant.
+- Bump `stop_grace_period` higher (120s+) if your tests put a lot of data into
+  the tenant — delete walks state.
+
+### Embedding gotchas
+
+- **Network reachability.** If your dev workflow runs the app on the host
+  (not in compose) and the rest in compose, keep the `ports:` section so the
+  host can hit `localhost:8080`. If everything is in compose, you can drop
+  `ports:` entirely.
+- **Audience must match the vend client policy.** If the client on your vend
+  tenant asserts `aud == 'ephemeral'`, every dependent service inherits that
+  constraint — passing `AUDIENCE=foo` 403s the whole stack (and the
+  healthcheck will fail with a GraphQL error from the upstream).
+- **One proxy per compose project.** Don't run two — they'd each vend a
+  separate tenant and your services would split-brain across them.
 
 ### Tips
 

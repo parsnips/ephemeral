@@ -38,6 +38,14 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch. Keep this above flag.Parse so the binary can be
+	// invoked as `proxy healthcheck` without colliding with the top-level
+	// flagset (used by Docker HEALTHCHECK — no curl in the distroless image).
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		runHealthcheck(os.Args[2:])
+		return
+	}
+
 	var (
 		region    = flag.String("region", envOr("AWS_REGION", "us-east-1"), "AWS / Twisp region")
 		twispEnv  = flag.String("env", envOr("TWISP_ENV", "cloud"), "Twisp environment (cloud, dev, ...)")
