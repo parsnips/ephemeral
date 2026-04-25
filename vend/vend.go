@@ -30,10 +30,9 @@ type Vendor struct {
 
 // Config configures a Vendor.
 type Config struct {
-	// Region for the endpoint URL (and inferred for STS by the caller).
-	Region string
-	// Env is the Twisp environment, e.g. "cloud" or "dev".
-	Env string
+	// Host is the Twisp hostname to talk to, e.g. "api.us-east-1.cloud.twisp.com".
+	// Defaults to "api.us-east-1.cloud.twisp.com".
+	Host string
 	// VendAccountID is the parent tenant's accountId.
 	VendAccountID string
 	// Prefix is prepended to generated ephemeral accountIds. Defaults to "ephemeral".
@@ -52,11 +51,8 @@ func New(cfg Config) (*Vendor, error) {
 	if cfg.Source == nil {
 		return nil, errors.New("vend: Source is required")
 	}
-	if cfg.Region == "" {
-		cfg.Region = "us-east-1"
-	}
-	if cfg.Env == "" {
-		cfg.Env = "cloud"
+	if cfg.Host == "" {
+		cfg.Host = "api.us-east-1.cloud.twisp.com"
 	}
 	if cfg.Prefix == "" {
 		cfg.Prefix = "ephemeral"
@@ -69,7 +65,7 @@ func New(cfg Config) (*Vendor, error) {
 			Transport: auth.NewRoundTripper(cfg.Source, cfg.VendAccountID, nil),
 			Timeout:   cfg.Timeout,
 		},
-		endpoint: fmt.Sprintf("https://api.%s.%s.twisp.com/financial/v1/graphql", cfg.Region, cfg.Env),
+		endpoint: fmt.Sprintf("https://%s/financial/v1/graphql", cfg.Host),
 		prefix:   cfg.Prefix,
 	}, nil
 }

@@ -47,8 +47,8 @@ func main() {
 	}
 
 	var (
-		region    = flag.String("region", envOr("AWS_REGION", "us-east-1"), "AWS / Twisp region")
-		twispEnv  = flag.String("env", envOr("TWISP_ENV", "cloud"), "Twisp environment (cloud, dev, ...)")
+		region    = flag.String("region", envOr("AWS_REGION", "us-east-1"), "AWS region (for STS only — Twisp endpoint is set via -host)")
+		host      = flag.String("host", envOr("TWISP_HOST", "api.us-east-1.cloud.twisp.com"), "Twisp host to proxy to (e.g. api.us-west-2.cloud.twisp.com); gRPC uses the same host on :50051")
 		audience  = flag.String("audience", envOr("AUDIENCE", "ephemeral"), "JWT audience claim")
 		httpAddr  = flag.String("http", ":8080", "address to listen on for HTTP/GraphQL")
 		grpcAddr  = flag.String("grpc", ":8081", "address to listen on for gRPC")
@@ -76,7 +76,7 @@ func main() {
 	}
 	source := auth.NewTokenSource(sts.NewFromConfig(cfg), *audience)
 
-	target, cleanup, err := resolveTenant(ctx, *vendAcct, *accountID, *tenantF, *fileWait, *region, *twispEnv, *vendPfx, source)
+	target, cleanup, err := resolveTenant(ctx, *vendAcct, *accountID, *tenantF, *fileWait, *host, *vendPfx, source)
 	if err != nil {
 		log.Fatalf("resolve tenant: %v", err)
 	}
@@ -84,10 +84,10 @@ func main() {
 		// Always run cleanup, even if the servers fail to start.
 		defer cleanup()
 	}
-	log.Printf("proxy targeting tenant accountId=%s region=%s env=%s", target, *region, *twispEnv)
+	log.Printf("proxy targeting tenant accountId=%s host=%s", target, *host)
 
-	httpHost := fmt.Sprintf("api.%s.%s.twisp.com", *region, *twispEnv)
-	grpcHost := fmt.Sprintf("api.%s.%s.twisp.com:50051", *region, *twispEnv)
+	httpHost := *host
+	grpcHost := *host + ":50051"
 
 	httpSrv := buildHTTPServer(*httpAddr, httpHost, source, target)
 	grpcSrv, grpcLis, err := buildGRPCServer(*grpcAddr, grpcHost, source, target)
@@ -119,11 +119,10 @@ func main() {
 // resolveTenant picks the accountId to proxy to. If vendAcct is non-empty it
 // creates a fresh tenant via the vend library and returns a cleanup func that
 // deletes it. Otherwise it returns the static accountID or reads the file.
-func resolveTenant(ctx context.Context, vendAcct, accountID, file string, wait time.Duration, region, env, prefix string, source *auth.TokenSource) (string, func(), error) {
+func resolveTenant(ctx context.Context, vendAcct, accountID, file string, wait time.Duration, host, prefix string, source *auth.TokenSource) (string, func(), error) {
 	if vendAcct != "" {
 		v, err := vend.New(vend.Config{
-			Region:        region,
-			Env:           env,
+			Host:          host,
 			VendAccountID: vendAcct,
 			Prefix:        prefix,
 			Source:        source,

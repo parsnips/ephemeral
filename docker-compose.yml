@@ -9,10 +9,10 @@
 # `docker compose down` sends SIGTERM; the proxy reaps the tenant before exit.
 #
 # Required (in .env or your shell):
-#   AWS_REGION                 AWS region for STS + the Twisp region.
+#   AWS_REGION                 AWS region for STS. Defaults to us-east-1; set if your AWS principal is elsewhere.
 #   AWS_PROFILE / AWS_*        credentials for an IAM principal trusted by the vend tenant's auth client.
 #   VEND_ACCOUNT_ID            accountId of the vend (parent) tenant.
-#   TWISP_ENV                  e.g. cloud, dev. Defaults to cloud.
+#   TWISP_HOST                 Twisp hostname to target. Defaults to api.us-east-1.cloud.twisp.com.
 #   AUDIENCE                   JWT aud claim. Must match the vend tenant's client policy assertion. Defaults to "ephemeral".
 
 services:
@@ -21,7 +21,7 @@ services:
     image: twisp-ephemeral:dev
     command:
       - -region=${AWS_REGION:-us-east-1}
-      - -env=${TWISP_ENV:-cloud}
+      - -host=${TWISP_HOST:-api.us-east-1.cloud.twisp.com}
       - -audience=${AUDIENCE:-ephemeral}
       - -vend-account=${VEND_ACCOUNT_ID}
       - -prefix=${EPHEMERAL_PREFIX:-ephemeral}

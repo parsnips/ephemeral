@@ -286,7 +286,7 @@ services:
     image: twisp-ephemeral:dev      # or the build: stanza from above
     command:
       - -region=${AWS_REGION:-us-east-1}
-      - -env=${TWISP_ENV:-cloud}
+      - -host=${TWISP_HOST:-api.us-east-1.cloud.twisp.com}
       - -audience=${AUDIENCE:-ephemeral}
       - -vend-account=${VEND_ACCOUNT_ID}
       - -prefix=${EPHEMERAL_PREFIX:-ephemeral}
@@ -343,10 +343,10 @@ alive".
 Same variables as the standalone repo:
 
 ```sh
-AWS_REGION=us-east-1
+AWS_REGION=us-east-1                         # STS region, decoupled from Twisp
 AWS_PROFILE=cloud-rw
 VEND_ACCOUNT_ID=ephemeral-vend
-TWISP_ENV=cloud
+TWISP_HOST=api.us-east-1.cloud.twisp.com     # any Twisp host; e.g. api.us-west-2.cloud.twisp.com
 AUDIENCE=ephemeral
 EPHEMERAL_PREFIX=ephemeral
 ```
@@ -404,6 +404,21 @@ docker compose down                  # SIGTERM → tenant deleted
   so a single `createClient` registration on each tenant covers every IAM
   role and user in that account. Use `assertions` for finer-grained checks
   (`context.auth.claims.sub == 'arn:aws:iam::…:role/MyRole'`).
+- **Targeting a different Twisp region/env.** `-host` is decoupled from
+  `-region`. Pass the full hostname:
+    ```sh
+    ./bin/proxy \
+      -host=api.us-west-2.cloud.twisp.com \
+      -vend-account=<your us-west-2 vend-tenant accountId> \
+      -audience=ephemeral
+    ```
+  `-region` only controls the AWS STS regional endpoint (latency only — the
+  JWT issuer is global, so the same client registration works regardless).
+  Twisp tenants are bound to the host that created them, so your
+  `VEND_ACCOUNT_ID` must exist in whichever host you point at; an auth
+  client must be registered on *that* vend tenant. Examples of valid hosts:
+  `api.us-east-1.cloud.twisp.com`, `api.us-west-2.cloud.twisp.com`,
+  `api.us-east-1.dev.twisp.com`. gRPC is the same hostname on `:50051`.
 
 ## Reusing the round tripper in your own services
 
@@ -547,8 +562,7 @@ import (
 )
 
 v, _ := vend.New(vend.Config{
-    Region:        "us-east-1",
-    Env:           "cloud",
+    Host:          "api.us-east-1.cloud.twisp.com", // optional; this is the default
     VendAccountID: "ephemeral-vend",
     Source:        src,    // *auth.TokenSource from above
 })
