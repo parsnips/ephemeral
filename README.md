@@ -423,16 +423,120 @@ httpc := &http.Client{
     Transport: auth.NewRoundTripper(src, "<accountId>", nil),
 }
 // httpc.Post("https://api.us-east-1.cloud.twisp.com/financial/v1/graphql", ...)
-
-// gRPC:
-//   conn, _ := grpc.NewClient("api.us-east-1.cloud.twisp.com:50051",
-//       grpc.WithTransportCredentials(credentials.NewTLS(nil)),
-//       grpc.WithPerRPCCredentials(&auth.GRPCPerRPC{Source: src, AccountID: "<accountId>"}),
-//   )
 ```
 
 Same `TokenSource` instance can drive multiple tenants — just use it with
 different account IDs.
+
+## Using the auth package with gRPC services
+
+`auth.GRPCPerRPC` is the gRPC mirror of `auth.RoundTripper`: same
+`TokenSource`, same caching behavior, same `iss` / `aud` semantics. It
+implements `credentials.PerRPCCredentials`, so wiring it up is a one-liner
+on the dial.
+
+```go
+import (
+    "github.com/aws/aws-sdk-go-v2/config"
+    "github.com/aws/aws-sdk-go-v2/service/sts"
+    "google.golang.org/grpc"
+    "google.golang.org/grpc/credentials"
+
+    "github.com/parsnips/ephemeral/auth"
+)
+
+cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+src := auth.NewTokenSource(sts.NewFromConfig(cfg), "ephemeral")
+
+conn, err := grpc.NewClient(
+    "api.us-east-1.cloud.twisp.com:50051",
+    grpc.WithTransportCredentials(credentials.NewTLS(nil)),
+    grpc.WithPerRPCCredentials(&auth.GRPCPerRPC{
+        Source:    src,
+        AccountID: "<accountId>",
+    }),
+)
+// conn is good for both unary and server/client/bidi streaming calls.
+```
+
+That's it — every call (unary or streaming) gets `authorization: Bearer …`
+and `x-twisp-account-id: …` injected on the initial metadata. You don't
+need separate interceptors for streaming.
+
+### Gotchas
+
+- **TLS is required.** `GRPCPerRPC.RequireTransportSecurity()` returns
+  `true`, so gRPC will refuse to attach the bearer over an insecure
+  connection — `grpc.NewClient(..., grpc.WithTransportCredentials(insecure.NewCredentials()))`
+  fails fast with `transport: cannot send secure credentials on an insecure connection`.
+  Always pair it with `credentials.NewTLS(nil)`. If you're talking to the
+  local **proxy** at `localhost:8081` (which is plaintext and unauthenticated
+  on purpose), don't use `GRPCPerRPC` — just dial it with `insecure.NewCredentials()`
+  and no per-RPC creds. The proxy attaches its own auth on the way out.
+
+- **One `ClientConn` per tenant.** `GRPCPerRPC.AccountID` is fixed at dial
+  time; the same conn always stamps the same `x-twisp-account-id`. To target
+  a different tenant, dial a second `ClientConn` with a different
+  `GRPCPerRPC.AccountID`. The shared `TokenSource` is fine to reuse — only
+  the per-RPC creds wrapper is per-tenant.
+
+- **Streaming auth is established once, at stream open.** gRPC calls
+  `GetRequestMetadata` when the stream starts and stamps the bearer on the
+  initial metadata. The JWT is good for ~5 min; `TokenSource` keeps
+  refreshing for new calls, but the metadata on an *already-open* stream is
+  frozen. In practice Twisp validates on stream open and trusts the
+  established session, so server-streaming results, batch uploads, and
+  anything finishing inside a few minutes are unaffected. If you run a
+  bidi/subscription stream that lives longer than the JWT and you start
+  seeing auth errors mid-stream, the fix is to reconnect periodically — not
+  to wrap the stream in a refresh interceptor.
+
+- **`GetRequestMetadata` uses the call's context for the STS refresh.**
+  That means a cancelled call cancels the in-flight `sts:GetWebIdentityToken`
+  if it triggered the refresh. Usually fine; if you see flaky auth on
+  short-deadline calls during a refresh window, give the dial context (or
+  the call) a deadline that's safely longer than your STS round-trip
+  (single-digit seconds is plenty in-region).
+
+- **The `TokenSource` cache is process-global and mutex-protected.** Safe
+  to share across goroutines, HTTP and gRPC clients, and multiple
+  `ClientConn`s. Don't construct a new one per call — you'll burn STS
+  quota and serialize on the refresh path.
+
+- **`RequireTransportSecurity = true` also bites in tests.** If you're
+  spinning up an in-memory gRPC server (`bufconn`) for tests and want to
+  exercise `GRPCPerRPC` end-to-end, you either have to stand up a TLS
+  server or stub out the per-RPC creds. We default to the latter — test
+  the auth wiring once with a real upstream, then use plain creds for the
+  rest of the suite.
+
+- **Audience mismatch fails identically to HTTP.** The `aud` claim in the
+  JWT comes from `NewTokenSource(client, audience)`. If your tenant's
+  client policy asserts `context.auth.claims.aud == 'ephemeral'` but you
+  passed `"foo"`, every RPC fails with `PermissionDenied` — the gRPC-side
+  symptom of the same 403 you'd get over HTTP. Symptom is per-call, not
+  per-connection, because the bearer is re-evaluated on each call's
+  metadata.
+
+- **Underlying AWS creds expiring mid-stream.** `TokenSource.Token` calls
+  `sts:GetWebIdentityToken` using whatever creds the AWS SDK chain
+  resolved at process start. SSO sessions are typically 1h; once they
+  expire, the *next* refresh fails (`ExpiredToken`), and any call that
+  triggers it bubbles that up. Same fix as the HTTP side: refresh the
+  shell creds (`aws sso login`) and the next refresh picks them up, or
+  restart the service.
+
+### Server-side: validating Twisp-style bearers in your own gRPC service
+
+`GRPCPerRPC` is a **client**-side helper — it produces credentials. If
+you're writing a gRPC service that wants to *accept* the same kind of
+JWT (e.g. a sidecar that mirrors Twisp's auth), this package doesn't
+ship a server-side interceptor. Validate the bearer in a
+`grpc.UnaryInterceptor` / `grpc.StreamInterceptor` against the issuer's
+JWKS and check the `aud` / `iss` / your custom claims yourself; the
+shape of the metadata (`authorization: Bearer …`,
+`x-twisp-account-id: …`) is what the client sends, but the verification
+side is up to you.
 
 ## Reusing the vend library
 
